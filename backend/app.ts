@@ -1,8 +1,24 @@
 process.env.NODE_TLS_REJECT_UNAUTHORIZED = "0";
 
 import express, { Request, Response } from "express";
+import cors from "cors";
+
 const app = express();
+
 app.use(express.json());
+app.use(cors());
+
+// ==================== CONFIG ====================
+
+const PORT = 3000;
+
+const BASE_URL = "https://student.mrtc.edu.in:8443";
+
+const LOGIN_URL = `${BASE_URL}/adhikrit-login-authentication/api/auth/signin`;
+
+const MARKS_URL = `${BASE_URL}/examtool-backend-adhikrit/api/v1`;
+
+// ==================== TYPES ====================
 
 interface User {
   username: string;
@@ -24,47 +40,15 @@ interface AuthResponse {
   refreshToken: string;
 }
 
-app.post("/login", async (req: Request, res: Response) => {
-  const { username, password }: User = req.body;
-  if (!username && !password) {
-    return res.status(401).json({
-      status: false,
-      message: "Both roll number and password are required",
-    });
-  }
-  const response = await fetch(
-    "https://student.mrtc.edu.in:8443/adhikrit-login-authentication/api/auth/signin",
-    {
-      method: "POST",
-      headers: {
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({
-        username: username,
-        password: password,
-        module: "ExamCell",
-      }),
-    },
-  );
-  if (!response.ok) {
-    throw new Error(`HTTP error! Status: ${response.status}`);
-  }
-
-  const data: AuthResponse = await response.json();
-  res.status(200).json(data);
-});
-
 interface MidMarksRequest {
   rollNumber: string;
   semester: string;
-  token: string;
 }
 
 interface SemMarksRequest {
   rollNumber: string;
   semester: string;
   degreeType: string;
-  token: string;
 }
 
 interface SplitupSubChild {
@@ -74,10 +58,6 @@ interface SplitupSubChild {
   currentUserName: string;
   currentUserEmail: string;
   currentUploadDateTime: string;
-}
-
-interface SemMarksEntry {
-  [key: string]: string;
 }
 
 interface MidMarksSubject {
@@ -95,39 +75,119 @@ interface MidMarksSubject {
   currentUploadDateTime: string;
 }
 
-interface SemMarksResponse {
-  [examTitle: string]: SemMarksEntry[];
-}
-
 interface MidMarksResponse {
   PRACTICAL: MidMarksSubject[];
   THEORY: MidMarksSubject[];
 }
 
-app.post("/mid", async (req: Request, res: Response) => {
-  const { rollNumber, semester }: MidMarksRequest = req.body;
-  const token = req.headers.authorization;
+interface SemMarksEntry {
+  [key: string]: string;
+}
 
-  if (!rollNumber || !semester || !token) {
+interface SemMarksResponse {
+  [examTitle: string]: SemMarksEntry[];
+}
+
+// ==================== HELPERS ====================
+
+// Normalize Authorization header
+const getBearerToken = (authHeader: string | undefined): string | null => {
+  if (!authHeader) return null;
+
+  const token = authHeader.replace(/^Bearer\s+/i, "").trim();
+
+  return token ? `Bearer ${token}` : null;
+};
+
+// Handle upstream API responses
+const getResponseData = async (response: globalThis.Response) => {
+  const text = await response.text();
+
+  try {
+    return text ? JSON.parse(text) : null;
+  } catch {
+    return text;
+  }
+};
+
+// ==================== LOGIN ====================
+
+app.post("/login", async (req: Request, res: Response) => {
+  const { username, password }: User = req.body;
+
+  if (!username?.trim() || !password) {
     return res.status(400).json({
       status: false,
-      message: "Roll number, semester, and authorization token are required",
+      message: "Username and password are required",
     });
   }
 
   try {
+    const response = await fetch(LOGIN_URL, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        username: username.trim(),
+        password,
+        module: "ExamCell",
+      }),
+    });
+
+    const data = await getResponseData(response);
+
+    if (!response.ok) {
+      return res.status(response.status).json({
+        status: false,
+        message: "Authentication failed",
+        error: data,
+      });
+    }
+
+    return res.status(200).json(data as AuthResponse);
+  } catch (error) {
+    console.error("Login error:", error);
+
+    return res.status(500).json({
+      status: false,
+      message: "Unable to connect to authentication server",
+    });
+  }
+});
+
+// ==================== MID MARKS ====================
+
+app.post("/mid", async (req: Request, res: Response) => {
+  const { rollNumber, semester }: MidMarksRequest = req.body;
+
+  const token = getBearerToken(req.headers.authorization);
+
+  if (!rollNumber?.trim() || !semester?.trim() || !token) {
+    return res.status(400).json({
+      status: false,
+      message: "Roll number, semester, and Bearer token are required",
+    });
+  }
+
+  try {
+    const params = new URLSearchParams({
+      rollNumber: rollNumber.trim(),
+      semester: `${semester.trim()} SEMESTER`,
+    });
+
     const response = await fetch(
-      `https://student.mrtc.edu.in:8443/examtool-backend-adhikrit/api/v1/midMarksDataBySemAndRollnumber?rollNumber=${encodeURIComponent(rollNumber)}&semester=${encodeURIComponent(semester)} SEMESTER`,
+      `${MARKS_URL}/midMarksDataBySemAndRollnumber?${params}`,
       {
         method: "GET",
         headers: {
-          "Content-Type": "application/json",
           Authorization: token,
+          Accept: "application/json",
         },
       },
     );
 
-    const data: MidMarksResponse = await response.json();
+    const data = await getResponseData(response);
 
     if (!response.ok) {
       return res.status(response.status).json({
@@ -137,44 +197,59 @@ app.post("/mid", async (req: Request, res: Response) => {
       });
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       status: true,
-      data: data,
+      data,
     });
   } catch (error) {
-    console.error("Error fetching mid marks:", error);
-    res.status(500).json({
+    console.error("Mid marks error:", error);
+
+    return res.status(500).json({
       status: false,
-      message: "Internal server error",
+      message: "Unable to fetch mid marks",
     });
   }
 });
 
+// ==================== SEMESTER MARKS ====================
+
 app.post("/sem", async (req: Request, res: Response) => {
   const { rollNumber, semester, degreeType }: SemMarksRequest = req.body;
-  const token = req.headers.authorization;
 
-  if (!rollNumber || !semester || !degreeType || !token) {
+  const token = getBearerToken(req.headers.authorization);
+
+  if (
+    !rollNumber?.trim() ||
+    !semester?.trim() ||
+    !degreeType?.trim() ||
+    !token
+  ) {
     return res.status(400).json({
       status: false,
       message:
-        "Roll number, semester, degree type, and authorization token are required",
+        "Roll number, semester, degree type, and Bearer token are required",
     });
   }
 
   try {
+    const params = new URLSearchParams({
+      rollNo: rollNumber.trim(),
+      semester: `${semester.trim()} SEMESTER`,
+      degreeType: degreeType.trim(),
+    });
+
     const response = await fetch(
-      `https://student.mrtc.edu.in:8443/examtool-backend-adhikrit/api/v1/getSemWiseDataWithRollNo?rollNo=${encodeURIComponent(rollNumber)}&semester=${encodeURIComponent(semester)} SEMESTER&degreeType=${encodeURIComponent(degreeType)}`,
+      `${MARKS_URL}/getSemWiseDataWithRollNo?${params}`,
       {
         method: "GET",
         headers: {
-          "Content-Type": "application/json",
           Authorization: token,
+          Accept: "application/json",
         },
       },
     );
 
-    const data: SemMarksResponse = await response.json();
+    const data = await getResponseData(response);
 
     if (!response.ok) {
       return res.status(response.status).json({
@@ -184,23 +259,31 @@ app.post("/sem", async (req: Request, res: Response) => {
       });
     }
 
-    res.status(200).json({
+    return res.status(200).json({
       status: true,
-      data: data,
+      data,
     });
   } catch (error) {
-    console.error("Error fetching semester marks:", error);
-    res.status(500).json({
+    console.error("Semester marks error:", error);
+
+    return res.status(500).json({
       status: false,
-      message: "Internal server error",
+      message: "Unable to fetch semester marks",
     });
   }
 });
 
-app.get("/ping", (req: Request, res: Response) => {
-  res.status(200).json({ ping: "pong" });
+// ==================== PING ====================
+
+app.get("/ping", (_req: Request, res: Response) => {
+  return res.status(200).json({
+    status: true,
+    ping: "pong",
+  });
 });
 
-app.listen(3000, () => {
-  console.log("server started on port 3000");
+// ==================== SERVER ====================
+
+app.listen(PORT, () => {
+  console.log(`Server started on port ${PORT}`);
 });
